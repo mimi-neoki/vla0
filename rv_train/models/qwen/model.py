@@ -13,9 +13,18 @@ import torch
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from torch import nn
-from transformers import AutoConfig, LogitsProcessor, Qwen2_5_VLProcessor
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
-    Qwen2_5_VLForConditionalGeneration
+from transformers import AutoConfig, LogitsProcessor
+from transformers.models.qwen2_5_vl import Qwen2_5_VLProcessor
+from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+    Qwen2_5_VLForConditionalGeneration,
+)
+
+# Optional Qwen3 imports (only required when using Qwen3-VL checkpoints)
+try:
+    from transformers import Qwen3VLProcessor, Qwen3VLForConditionalGeneration
+except Exception:  # pragma: no cover
+    Qwen3VLProcessor = None
+    Qwen3VLForConditionalGeneration = None
 
 import rv_train.constants as C
 from rv_train.utils.train_utils import ForkedPdb as debug  # noqa: F401
@@ -236,6 +245,8 @@ class QwenActor(nn.Module):
         use_flash_attention_2,
         attention_dropout,
     ):
+        is_qwen3 = "qwen3" in qwen_model_id.lower()
+
         if lora_config == "":
             lora_config = None
         elif lora_config == "default":
@@ -269,19 +280,31 @@ class QwenActor(nn.Module):
         if use_flash_attention_2:
             extra_kwargs["attn_implementation"] = "flash_attention_2"
 
+        config = AutoConfig.from_pretrained(qwen_model_id, trust_remote_code=True)
         if attention_dropout > 0.0:
-            config = AutoConfig.from_pretrained(qwen_model_id)
             config.attention_dropout = attention_dropout
             extra_kwargs["config"] = config
 
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
+        # Select model class depending on checkpoint family
+        if is_qwen3:
+            if Qwen3VLForConditionalGeneration is None:
+                raise ImportError(
+                    "Qwen3VLForConditionalGeneration is not available. Please upgrade transformers to a version that includes Qwen3 support."
+                )
+            model_cls = Qwen3VLForConditionalGeneration
+        else:
+            model_cls = Qwen2_5_VLForConditionalGeneration
+
+        # Load base model (no built-in LoRA for Qwen3, apply via peft later)
+        model = model_cls.from_pretrained(
             qwen_model_id,
-            # device_map={"": "cuda:0"},  # Use the explicit map
             quantization_config=bnb_config,
             torch_dtype=torch.bfloat16,
+            trust_remote_code=True,
             **extra_kwargs,
         )
 
+        # Apply external LoRA if requested
         if use_lora and (lora_config is not None):
             model = get_peft_model(model, lora_config)
 
@@ -294,6 +317,16 @@ class QwenActor(nn.Module):
         max_pixel,
         padding_side,
     ):
+        is_qwen3 = "qwen3" in qwen_model_id.lower()
+
+        if is_qwen3:
+            if Qwen3VLProcessor is None:
+                raise ImportError(
+                    "Qwen3VLProcessor is not available. Please upgrade transformers to a version that includes Qwen3 support."
+                )
+            # Qwen3 processors handle sizing internally; avoid min_pixels/max_pixels args.
+            return Qwen3VLProcessor.from_pretrained(qwen_model_id, trust_remote_code=True)
+
         if padding_side is not None:
             processor = Qwen2_5_VLProcessor.from_pretrained(
                 qwen_model_id,

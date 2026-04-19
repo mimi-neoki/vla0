@@ -2,7 +2,9 @@
 #
 # Licensed under the CC BY-NC 4.0 license [see LICENSE for details].
 
+import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 
@@ -43,9 +45,10 @@ requirements = [
 extras_require = {
     # 'lerobot': Dependencies for LeRobot functionality
     "lerobot": [
-        # lerobot is installed locally from libs/lerobot via custom install methods
-        # "lerobot==0.1.0",
-        # "ffmpeg",
+        # The upstream lerobot wheel currently declares a huggingface-hub>=1.0
+        # requirement, which conflicts with the transformers 4.x stack used by VLA-0.
+        # We install the package itself in post-install with --no-deps after the
+        # shared runtime dependencies have already been resolved by the main env.
     ],
 }
 
@@ -60,6 +63,17 @@ extras_require["all"] = list(set(all_extras))
 print(f"Environment: PIP_REQ_EXTRAS={os.environ.get('PIP_REQ_EXTRAS', 'not set')}")
 
 
+def _ensure_pip_available():
+    """Bootstrap pip inside uv-created virtualenvs that start without it."""
+    if importlib.util.find_spec("pip") is None:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise RuntimeError(
+                "pip is unavailable in the current environment and uv was not found on PATH."
+            )
+        subprocess.check_call([uv, "pip", "install", "--python", sys.executable, "pip"])
+
+
 # --- Shared Post-Install Tasks ---
 # This function is called by CustomInstallCommand, CustomDevelopCommand, and CustomEditableWheelCommand
 def _run_post_install_tasks():
@@ -69,11 +83,12 @@ def _run_post_install_tasks():
     Handles:
     - Installing pre-commit hooks (if available)
     - Installing optional extras based on PIP_REQ_EXTRAS environment variable
-    - Installing lerobot dependencies
+    - Verifying lerobot system dependencies
     """
     print("\n" + "=" * 80)
     print("Running custom post-install tasks...")
     print("=" * 80 + "\n")
+    _ensure_pip_available()
 
     # Try to install pre-commit hooks (may not be available during wheel build)
     try:
@@ -110,51 +125,23 @@ def _run_post_install_tasks():
         print("Installing lerobot extras...")
         print("-" * 80 + "\n")
 
-        # conda install ffmpeg=7.1.1 -c conda-forge
-        print("Installing ffmpeg via conda...")
+        print("Installing lerobot==0.5.1 without transitive dependency resolution...")
         subprocess.check_call(
-            ["conda", "install", "-y", "ffmpeg=7.1.1", "-c", "conda-forge"]
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-v",
+                "--no-deps",
+                "lerobot==0.5.1",
+            ]
         )
-
-        # Calculate path relative to workspace root
-        setup_dir = os.path.dirname(os.path.abspath(__file__))
-        lerobot_path = os.path.join(setup_dir, "libs", "lerobot")
-
-        print(f"Debug: Setup dir = {setup_dir}")
-        print(f"Debug: Looking for lerobot at: {lerobot_path}")
-
-        if os.path.exists(lerobot_path):
-            print(f"\nInstalling lerobot from {lerobot_path} with verbose output...\n")
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "-vv", "-e", lerobot_path]
+        if shutil.which("ffmpeg") is None:
+            print(
+                "WARNING: ffmpeg was not found on PATH. "
+                "LeRobot dataset video loading may fail until ffmpeg is installed."
             )
-        else:
-            print(f"\nWARNING: lerobot directory not found at {lerobot_path}")
-
-        # Install the correct version of datasets
-        # as the latest version of datasets is not compatible with commit of lerobot we are using
-        print("\nInstalling datasets==3.5.0...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-v", "datasets==3.5.0"]
-        )
-        # Install the working version of numpy as opencv is upgrading it to >=2 which is not compatible with other requirements
-        print("\nInstalling numpy==1.26.4...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-v", "numpy==1.26.4"]
-        )
-        # Install specific versions of torch, torchvision, and transformers
-        print("\nInstalling torch==2.7.1...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-v", "torch==2.7.1"]
-        )
-        print("\nInstalling torchvision==0.22.1...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-v", "torchvision==0.22.1"]
-        )
-        print("\nInstalling transformers==4.51.3...")
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-v", "transformers==4.51.3"]
-        )
 
     print("\n" + "=" * 80)
     print("Custom post-install tasks completed!")

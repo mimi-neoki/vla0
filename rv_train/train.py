@@ -22,6 +22,7 @@ from torch import autocast
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 
 from rv_train import models
 from rv_train.configs import get_cfg_defaults
@@ -237,7 +238,9 @@ def default_batch_proc(data_batch, device):
     return data_batch
 
 
-def get_dataloader(split, cfg, get_dataset=False):
+def get_dataloader(
+    split, cfg, get_dataset=False, distributed=False, rank=0, world_size=1
+):
     """
     Returns dataloader based on the config and split
     :param get_dataset: whether to return the dataset or the dataloader
@@ -259,13 +262,24 @@ def get_dataloader(split, cfg, get_dataset=False):
     if get_dataset:
         return dataset
     else:
+        sampler = None
+        if distributed:
+            sampler = DistributedSampler(
+                dataset,
+                num_replicas=world_size,
+                rank=rank,
+                shuffle=(split == "train"),
+                drop_last=(split == "train"),
+            )
         return DataLoader(
             dataset,
             batch_size,
             num_workers=num_workers,
-            shuffle=(split == "train"),
+            shuffle=((split == "train") and (sampler is None)),
+            sampler=sampler,
             drop_last=(split == "train"),
-            pin_memory=(torch.cuda.is_available()) and (not num_workers),
+            pin_memory=torch.cuda.is_available(),
+            prefetch_factor=(2 if num_workers > 0 else None),
             persistent_workers=(num_workers > 0),
         )
 
@@ -353,11 +367,13 @@ def train(
 
     model.train()
     perf = utils.PerfTrackTrain(cfg)
+    grad_accum_steps = max(1, cfg.TRAIN.grad_accum_steps)
 
     time_for = 0
     time_bac = 0
     time_dl = 0
     time4 = time()
+    optimizer.zero_grad(set_to_none=True)
     for i, data_batch in tqdm.tqdm(enumerate(loader), dynamic_ncols=True):
         data_batch = loader.dataset.batch_proc(data_batch, device)
         inp = get_inp(cfg, data_batch)
@@ -365,19 +381,24 @@ def train(
         time1 = time()
         with autocast(device_type="cuda", dtype=torch.bfloat16, enabled=cfg.EXP.AMP):
             out = model(**inp, get_loss=True)
-        loss = out["loss"]
-        perf.update_all(data_batch=data_batch, out=out, loss=loss)
+        unscaled_loss = out["loss"]
+        perf.update_all(data_batch=data_batch, out=out, loss=unscaled_loss.detach())
+        loss = unscaled_loss / grad_accum_steps
 
         time2 = time()
-        optimizer.zero_grad()
         loss.backward()
-        if cfg.TRAIN.clip_grad_norm != 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.TRAIN.clip_grad_norm)
+        should_step = ((i + 1) % grad_accum_steps == 0) or ((i + 1) == len(loader))
+        if should_step:
+            if cfg.TRAIN.clip_grad_norm != 0:
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.TRAIN.clip_grad_norm
+                )
 
-        if check_grad_fn and check_grad(model, loss):  # Use the renamed parameter
-            print("WARNING: avoiding step as bad gradient")
-        else:
-            optimizer.step()
+            if check_grad_fn and check_grad(model, unscaled_loss):
+                print("WARNING: avoiding step as bad gradient")
+            else:
+                optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         time3 = time()
         time_dl += time1 - time4
@@ -451,11 +472,12 @@ def entry_train(
     Training and evaluating a network based on the specified config.
     """
 
-    device = devices[rank]
-    device = f"cuda:{device}"
+    local_device_id = devices[rank]
+    device = torch.device(f"cuda:{local_device_id}")
     ddp = len(devices) > 1
-    utils.setup(rank, world_size=len(devices), port=port)
     torch.cuda.set_device(device)
+    if ddp:
+        utils.setup(rank, world_size=len(devices), port=port)
     if ddp:
         print(f"Running on rank {rank}")
 
@@ -463,7 +485,13 @@ def entry_train(
     # np.random.seed(cfg.EXP.SEED + rank)
     # torch.manual_seed(cfg.EXP.SEED + rank)
 
-    loader_train = get_dataloader(split="train", cfg=cfg)
+    loader_train = get_dataloader(
+        split="train",
+        cfg=cfg,
+        distributed=ddp,
+        rank=rank,
+        world_size=len(devices),
+    )
     model = get_model(cfg)
     model.to(device)
 
@@ -478,8 +506,6 @@ def entry_train(
         model.to(device)
 
     if ddp:
-        # Set find_unused_parameters=False when using gradient checkpointing
-        # to avoid synchronization issues and deadlocks
         using_grad_checkpoint = False
         if cfg.EXP.MODEL in ["qwen", "qwen_dp"]:
             model_config = (
@@ -487,13 +513,16 @@ def entry_train(
             )
             using_grad_checkpoint = getattr(model_config, "grad_checkpoint", False)
 
-        find_unused_params = not using_grad_checkpoint
+        find_unused_params = False
         if rank == 0:
             print(
                 f"DDP configuration: grad_checkpoint={using_grad_checkpoint}, find_unused_parameters={find_unused_params}"
             )
         model = DDP(
-            model, device_ids=[device], find_unused_parameters=find_unused_params
+            model,
+            device_ids=[local_device_id],
+            output_device=local_device_id,
+            find_unused_parameters=find_unused_params,
         )
     if rank == 0:
         print(model)
@@ -515,7 +544,8 @@ def entry_train(
     if rank == 0:
         print_model_stats(model)
 
-    dist.barrier()
+    if ddp:
+        dist.barrier()
 
     if rank == 0:
         log_dir = get_log_dir(cfg, logdir_with_time)
@@ -535,6 +565,9 @@ def entry_train(
 
     for epoch in range(old_epoch + 1, cfg.TRAIN.num_epochs):
         fn_check_time_limit_and_relaunch = None
+
+        if ddp and isinstance(loader_train.sampler, DistributedSampler):
+            loader_train.sampler.set_epoch(epoch)
 
         # print epoch number
         if rank == 0:
@@ -630,6 +663,9 @@ def entry_train(
     if rank == 0:
         # close tensorboard
         tb.close()
+
+    if ddp:
+        utils.cleanup()
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ _C.TRAIN.num_epochs = 100
 _C.TRAIN.l2 = 0.0
 _C.TRAIN.lr = 1e-4
 _C.TRAIN.clip_grad_norm = 1.0  # 0 means no clipping
+_C.TRAIN.grad_accum_steps = 1
 # ----------------------------------------------------------------------------
 # TRAINING SCHEDULER
 # ----------------------------------------------------------------------------

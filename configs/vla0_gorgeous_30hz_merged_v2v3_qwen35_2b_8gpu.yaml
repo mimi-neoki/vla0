@@ -1,0 +1,36 @@
+EXP:
+  EXP_ID: "vla0_gorgeous_30hz_merged_v2v3_qwen35_2b_8gpu"
+  MODEL: "qwen"
+  LR_SCHED: "none"
+  AMP: True
+  OPTIMIZER: "adamw"
+
+TRAIN:
+  lr: 3.125e-7
+  num_epochs: 64
+  clip_grad_norm: 0.0
+  l2: 1e-10
+  grad_accum_steps: 1
+
+EXP_EXTRA:
+  save_ckp: 2
+
+DATALOADER:
+  batch_size: 12
+  num_workers: 4
+  ROBOVERSE:
+    cfg_path: libs/RoboVerse/roboverse/configs/img_gorgeous_30hz_merged_v2v3.yaml
+    cfg_opts: IMAGE.crop_img:0.875:IMAGE.img_size:224:IMAGE.cam_list:('3p1','3p2','3p3')
+
+MODEL:
+  QWEN:
+    qwen_model_id: "Qwen/Qwen3.5-2B"
+    add_vision_id: True
+    use_lora: False
+    use_qlora: False
+    use_flash_attention_2: True
+    rgb_img_size: 224,224
+    original_action_dim: 12
+    action_mask_aug_per: 0.4
+    num_cam: 3
+    tiled_rgb_imgs: True

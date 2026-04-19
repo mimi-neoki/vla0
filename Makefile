@@ -6,7 +6,7 @@ lint:
 	@files=$$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$$'); \
 	if [ -n "$$files" ]; then \
 		echo "Linting staged Python files..."; \
-		echo $$files | xargs flake8; \
+		echo $$files | xargs uv run flake8; \
 	else \
 		echo "No Python files to lint."; \
 	fi
@@ -16,8 +16,8 @@ format:
 	@files=$$(git diff --cached --name-only --diff-filter=ACM | grep '\.py$$'); \
 	if [ -n "$$files" ]; then \
 		echo "Formatting staged Python files..."; \
-		echo $$files | xargs black; \
-		echo $$files | xargs isort; \
+		echo $$files | xargs uv run black; \
+		echo $$files | xargs uv run isort; \
 	else \
 		echo "No Python files to format."; \
 	fi

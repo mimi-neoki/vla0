@@ -2,7 +2,9 @@
 #
 # Licensed under the CC BY-NC 4.0 license [see LICENSE for details].
 
+import importlib.util
 import os
+import shutil
 import subprocess
 import sys
 
@@ -56,6 +58,17 @@ extras_require["all"] = list(set(all_extras))
 print(f"Environment: PIP_REQ_EXTRAS={os.environ.get('PIP_REQ_EXTRAS', 'not set')}")
 
 
+def ensure_pip_available():
+    """Bootstrap pip inside uv-created virtualenvs that start without it."""
+    if importlib.util.find_spec("pip") is None:
+        uv = shutil.which("uv")
+        if uv is None:
+            raise RuntimeError(
+                "pip is unavailable in the current environment and uv was not found on PATH."
+            )
+        subprocess.check_call([uv, "pip", "install", "--python", sys.executable, "pip"])
+
+
 def edit_cmake_version(cmake_file_path):
     """Edit CMakeLists.txt to set cmake_minimum_required to version 3.5"""
     import re
@@ -84,6 +97,31 @@ def edit_cmake_version(cmake_file_path):
         f.write(modified_content)
 
     print("Successfully updated cmake_minimum_required to VERSION 3.5")
+
+
+def patch_egl_probe_setup(egl_probe_path):
+    """Patch egl_probe's setup.py so CMake 4.x accepts the project."""
+    setup_py = os.path.join(egl_probe_path, "setup.py")
+    if not os.path.exists(setup_py):
+        print(f"Warning: setup.py not found at {setup_py}")
+        return
+
+    print(f"Patching {setup_py} to set CMAKE_POLICY_VERSION_MINIMUM=3.5")
+
+    with open(setup_py, "r") as f:
+        content = f.read()
+
+    modified_content = content.replace(
+        'subprocess.check_call("cmake ..; make -j", cwd=build_dir, shell=True)',
+        'subprocess.check_call("cmake -DCMAKE_POLICY_VERSION_MINIMUM=3.5 ..; make -j", cwd=build_dir, shell=True)',
+    )
+
+    if modified_content != content:
+        with open(setup_py, "w") as f:
+            f.write(modified_content)
+        print(f"Successfully patched {setup_py}")
+    else:
+        print(f"No changes needed in {setup_py}")
 
 
 def patch_libero_torch_load(libero_path):
@@ -131,6 +169,18 @@ def patch_libero_torch_load(libero_path):
         )
 
 
+LIBERO_RUNTIME_REQUIREMENTS = [
+    "hydra-core>=1.3,<1.4",
+    "easydict==1.9",
+    "robomimic==0.2.0",
+    "thop==0.1.1.post2209072238",
+    "robosuite==1.4.0",
+    "bddl==1.0.1",
+    "future==0.18.2",
+    "cloudpickle==2.1.0",
+]
+
+
 # --- Shared Post-Install Tasks ---
 # This function is called by CustomInstallCommand, CustomDevelopCommand, and CustomEditableWheelCommand
 def _run_post_install_tasks():
@@ -145,6 +195,7 @@ def _run_post_install_tasks():
     print("\n" + "=" * 80)
     print("Running custom post-install tasks...")
     print("=" * 80 + "\n")
+    ensure_pip_available()
 
     # Try to install pre-commit hooks (may not be available during wheel build)
     try:
@@ -234,8 +285,12 @@ def _run_post_install_tasks():
         # Edit CMakeLists.txt before installation
         cmake_file = os.path.join(egl_probe_path, "egl_probe", "CMakeLists.txt")
         edit_cmake_version(cmake_file)
-        # install cmake via conda as it is required by egl_probe
-        subprocess.check_call(["conda", "install", "-y", "-c", "conda-forge", "cmake"])
+        patch_egl_probe_setup(egl_probe_path)
+        if shutil.which("cmake") is None:
+            raise RuntimeError(
+                "cmake was not found on PATH. Install a system cmake package before "
+                "installing the libero extra."
+            )
         # install egl_probe
         print(f"Installing egl_probe from {egl_probe_path}")
         subprocess.check_call(
@@ -245,20 +300,21 @@ def _run_post_install_tasks():
         # install LIBERO
         print(f"Installing LIBERO from {libero_path}")
         subprocess.check_call(
-            [
-                "pip",
-                "install",
-                "-v",
-                "-r",
-                os.path.join(libero_path, "requirements.txt"),
-            ]
+            [sys.executable, "-m", "pip", "install", "-v", *LIBERO_RUNTIME_REQUIREMENTS]
         )
         subprocess.check_call(["pip", "install", "-v", "-e", libero_path])
 
-        # Force upgrade numpy to meet our requirements
-        # LIBERO donwgrades numpy to 1.22.0, which is not compatible with our requirements of save dataset stats
+        # Keep numpy aligned with LeRobot v0.5.1, which requires numpy>=2.0.
         subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "-v", "--upgrade", "numpy==1.26.4"]
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "-v",
+                "--upgrade",
+                "numpy>=2.0,<2.3",
+            ]
         )
 
     print("\n" + "=" * 80)

@@ -1,0 +1,26 @@
+# LeRobot dataset config for rook86/gorgeous-30hz-merged-v2v3
+unifier: image
+history: 1
+horizon: 8
+datasets: [lerobot]
+
+LEROBOT:
+  repo_id: rook86/gorgeous-30hz-merged-v2v3
+  action_key: action
+  state_key: observation.state
+  le_cam_list:
+    - observation.images.left_top
+    - observation.images.left_left
+    - observation.images.left_right
+  rv_cam_list:
+    - 3p1
+    - 3p2
+    - 3p3
+
+IMAGE:
+  crop_img: 1.0
+  brightness_aug: 0.2
+  contrast_aug: 0.2
+  saturation_aug: 0.2
+  hue_aug: 0.05
+  return_ori_act: True

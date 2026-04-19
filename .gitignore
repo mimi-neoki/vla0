@@ -39,3 +39,7 @@ libs/LIBERO/
 .cursorignore
 .hf_token
 slurm/libero_eval/
+
+
+.cache/*
+.nccl_override/*

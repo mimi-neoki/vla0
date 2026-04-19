@@ -1,0 +1,65 @@
+[project]
+name = "vla0-env"
+version = "0.1.0"
+description = "Locked uv environment for VLA-0"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "black==23.3.0",
+    "datasets>=4.0.0,<5.0.0",
+    "einops",
+    "flake8==7.1.0",
+    "gym",
+    "h5py",
+    "imageio",
+    "imageio-ffmpeg==0.4.7",
+    "isort==5.12.0",
+    "matplotlib",
+    "meshcat",
+    "numpy>=2.0.0,<2.3.0",
+    "opencv-python-headless",
+    "pre-commit",
+    "scipy",
+    "tbparse",
+    "tensorboardx",
+    "torch==2.7.1",
+    "torchvision==0.22.1",
+    "tqdm",
+    "transformers @ git+https://github.com/huggingface/transformers.git@main",
+    "trimesh",
+    "yacs==0.1.8",
+    "zarr",
+]
+
+[project.optional-dependencies]
+qwen = [
+    "hf_xet",
+    "peft",
+    "qwen-vl-utils>=0.0.14",
+]
+lerobot = [
+    "accelerate>=1.10.0,<2.0.0",
+    "av>=15.0.0,<16.0.0",
+    "cmake>=3.29.0.1,<4.2.0",
+    "deepdiff>=7.0.1,<9.0.0",
+    "diffusers>=0.27.2,<0.36.0",
+    "draccus==0.10.0",
+    "gymnasium>=1.1.1,<2.0.0",
+    "huggingface-hub>=1.5.0,<2.0.0",
+    "jsonlines>=4.0.0,<5.0.0",
+    "packaging>=24.2,<26.0",
+    "pyserial>=3.5,<4.0",
+    "rerun-sdk>=0.24.0,<0.27.0",
+    "setuptools>=71.0.0,<81.0.0",
+    "termcolor>=2.4.0,<4.0.0",
+    "wandb>=0.24.0,<0.25.0",
+]
+
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+package = false
+
+[tool.isort]
+profile = "black"

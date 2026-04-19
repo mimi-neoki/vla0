@@ -13,9 +13,13 @@ import torch
 from PIL import Image
 from qwen_vl_utils import process_vision_info
 from torch import nn
-from transformers import AutoConfig, LogitsProcessor, Qwen2_5_VLProcessor
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import \
-    Qwen2_5_VLForConditionalGeneration
+from transformers import (
+    AutoConfig,
+    AutoModelForImageTextToText,
+    AutoProcessor,
+    LogitsProcessor,
+)
+from transformers.utils.import_utils import is_flash_attn_2_available
 
 import rv_train.constants as C
 from rv_train.utils.train_utils import ForkedPdb as debug  # noqa: F401
@@ -156,6 +160,9 @@ class QwenActor(nn.Module):
         self.tiled_rgb_imgs = tiled_rgb_imgs
         self.num_bins_actions = num_bins_actions
         self.use_flash_attention_2 = use_flash_attention_2
+        self.attn_implementation = self.get_attn_implementation(
+            self.use_flash_attention_2
+        )
         self.action_mask_aug_per = action_mask_aug_per
         self.attention_dropout = attention_dropout
 
@@ -181,9 +188,13 @@ class QwenActor(nn.Module):
             qwen_model_id=qwen_model_id,
             min_pixel=self.min_pixel,
             max_pixel=self.max_pixel,
-            padding_side="left" if use_flash_attention_2 else None,
+            padding_side=(
+                "left" if self.attn_implementation == "flash_attention_2" else None
+            ),
         )
         self.logits_processor = NumberSpaceOnlyProcessor(self.processor.tokenizer)
+        self.question_token_id = self._get_single_token_id("?")
+        self.pad_token_id = self.processor.tokenizer.pad_token_id
 
         print(
             "WARNING: Using hardcoded dataset stats for DP3. This should be replaced with loading from a file."
@@ -209,6 +220,35 @@ class QwenActor(nn.Module):
 
         self.cache_sysuser_len = False
 
+    def _get_single_token_id(self, token_text):
+        token_ids = self.processor.tokenizer.encode(
+            token_text, add_special_tokens=False
+        )
+        if len(token_ids) != 1:
+            raise ValueError(
+                f"Expected '{token_text}' to map to a single token, got {token_ids}"
+            )
+        return token_ids[0]
+
+    def _apply_chat_template(
+        self,
+        example,
+        tokenize=False,
+        add_generation_prompt=False,
+    ):
+        kwargs = {
+            "tokenize": tokenize,
+            "add_generation_prompt": add_generation_prompt,
+        }
+        if self.add_vision_id:
+            try:
+                return self.processor.apply_chat_template(
+                    example, add_vision_id=True, **kwargs
+                )
+            except TypeError:
+                pass
+        return self.processor.apply_chat_template(example, **kwargs)
+
     def set_dataset_stats(self, dataset_stats):
         """
         Set the dataset stats for the model
@@ -225,6 +265,18 @@ class QwenActor(nn.Module):
             self.dataset_stats = dataset_stats["out_ori_act"]
         else:
             raise NotImplementedError(f"Action type {self.action_type} not implemented")
+
+    @staticmethod
+    def get_attn_implementation(use_flash_attention_2):
+        if not use_flash_attention_2:
+            return None
+        if is_flash_attn_2_available():
+            return "flash_attention_2"
+        warnings.warn(
+            "flash_attention_2 was requested, but flash-attn is not installed. "
+            "Falling back to PyTorch SDPA for attention layers."
+        )
+        return "sdpa"
 
     @staticmethod
     def load_qwen_model(
@@ -266,21 +318,27 @@ class QwenActor(nn.Module):
             )
 
         extra_kwargs = {}
-        if use_flash_attention_2:
-            extra_kwargs["attn_implementation"] = "flash_attention_2"
+        attn_implementation = QwenActor.get_attn_implementation(use_flash_attention_2)
+        if attn_implementation is not None:
+            extra_kwargs["attn_implementation"] = attn_implementation
 
         if attention_dropout > 0.0:
             config = AutoConfig.from_pretrained(qwen_model_id)
             config.attention_dropout = attention_dropout
             extra_kwargs["config"] = config
 
-        model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-            qwen_model_id,
-            # device_map={"": "cuda:0"},  # Use the explicit map
-            quantization_config=bnb_config,
-            torch_dtype=torch.bfloat16,
-            **extra_kwargs,
-        )
+        try:
+            model = AutoModelForImageTextToText.from_pretrained(
+                qwen_model_id,
+                quantization_config=bnb_config,
+                torch_dtype=torch.bfloat16,
+                **extra_kwargs,
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to load '{qwen_model_id}'. "
+                "Qwen3.5 models require a recent transformers build with Image-Text-to-Text support."
+            ) from e
 
         if use_lora and (lora_config is not None):
             model = get_peft_model(model, lora_config)
@@ -294,21 +352,14 @@ class QwenActor(nn.Module):
         max_pixel,
         padding_side,
     ):
+        common_kwargs = {
+            "min_pixels": min_pixel,
+            "max_pixels": max_pixel,
+        }
         if padding_side is not None:
-            processor = Qwen2_5_VLProcessor.from_pretrained(
-                qwen_model_id,
-                min_pixels=min_pixel,
-                max_pixels=max_pixel,
-                padding_side=padding_side,
-            )
-        else:
-            processor = Qwen2_5_VLProcessor.from_pretrained(
-                qwen_model_id,
-                min_pixels=min_pixel,
-                max_pixels=max_pixel,
-            )
+            common_kwargs["padding_side"] = padding_side
 
-        return processor
+        return AutoProcessor.from_pretrained(qwen_model_id, **common_kwargs)
 
     def get_min_max_act(self, instruction):
         """
@@ -530,11 +581,8 @@ class QwenActor(nn.Module):
             examples = [e[:2] for e in examples]
 
         texts = [
-            self.processor.apply_chat_template(
-                example,
-                tokenize=False,
-                add_generation_prompt=add_generation_prompt,
-                add_vision_id=self.add_vision_id,
+            self._apply_chat_template(
+                example, tokenize=False, add_generation_prompt=add_generation_prompt
             )
             # when add_generation_prompt is True, it will add the prompt
             # `assistant\n` to the end of the input text
@@ -677,8 +725,9 @@ class QwenActor(nn.Module):
             for i, example in enumerate(examples):
                 if (self._sysuser_len is None) or (not self.cache_sysuser_len):
                     sysuser_conv = example[:-1]
-                    sysuser_text = self.processor.apply_chat_template(
-                        sysuser_conv, tokenize=False, add_vision_id=self.add_vision_id
+                    sysuser_text = self._apply_chat_template(
+                        sysuser_conv,
+                        tokenize=False,
                     )
                     sysuser_img, _ = process_vision_info(sysuser_conv)
 
@@ -698,18 +747,18 @@ class QwenActor(nn.Module):
                 # when padding is right: self.processor.decode(model_inputs["input_ids"][0][0:sysuser_len])
                 # when padding is left: self.processor.decode(model_inputs["input_ids"][0][num_pad_tokens: num_pad_tokens + sysuser_len])
                 if self.processor.tokenizer.padding_side == "right":
+                    content_offset = 0
                     labels[i, :sysuser_len] = -100
                 elif self.processor.tokenizer.padding_side == "left":
-                    num_pad_tokens = sum(labels[i] == 151643).item()
-                    labels[i, num_pad_tokens : num_pad_tokens + sysuser_len] = -100
+                    if self.pad_token_id is None:
+                        raise ValueError("Tokenizer does not define a pad token id")
+                    content_offset = sum(labels[i] == self.pad_token_id).item()
+                    labels[i, content_offset : content_offset + sysuser_len] = -100
                 else:
                     raise ValueError(
                         f"Unknown padding side: {self.processor.tokenizer.padding_side}"
                     )
 
-                assert (
-                    not self.processor.tokenizer.padding_side == "left"
-                ), "current implementation only supports right padding"
                 # for debugging, compare
                 # self.processor.decode(model_inputs["input_ids"][i][model_inputs["attention_mask"][i] == 1])
                 # with self.processor.decode(model_inputs["input_ids"][i])
@@ -722,16 +771,15 @@ class QwenActor(nn.Module):
                 mask_len = int(len(_action_txt) * _action_mask_aug_per)
                 mask_indices = random.sample(range(len(_action_txt)), mask_len)
                 mask_indices = [
-                    x + sysuser_len for x in mask_indices
-                ]  # add sysuser_len to the mask indices to get the correct indices of these tokens
+                    x + content_offset + sysuser_len for x in mask_indices
+                ]  # offset by padding and the system/user prefix to target assistant action tokens
                 labels[
                     i, mask_indices
                 ] = -100  # these elements will not be used for loss calculation
-                model_inputs["input_ids"][
-                    i, mask_indices
-                ] = 30  # replace the input ids with '?' token id
+                model_inputs["input_ids"][i, mask_indices] = self.question_token_id
 
-            labels[labels == 151643] = -100
+            if self.pad_token_id is not None:
+                labels[labels == self.pad_token_id] = -100
 
             outputs = self.model(**model_inputs)
             logits = outputs.logits  # (batch_size, seq_len, vocab_size)
@@ -850,38 +898,41 @@ class QwenActor(nn.Module):
                 path,
                 is_trainable=is_trainable,
             )
-            print("Loading Qwen2.5 PEFT model from", path)
+            print("Loading PEFT VLM model from", path)
         else:
             extra_kwargs = {}
-            if self.use_flash_attention_2:
-                extra_kwargs["attn_implementation"] = "flash_attention_2"
+            self.attn_implementation = self.get_attn_implementation(
+                self.use_flash_attention_2
+            )
+            if self.attn_implementation is not None:
+                extra_kwargs["attn_implementation"] = self.attn_implementation
             if self.attention_dropout > 0.0:
                 config = AutoConfig.from_pretrained(path)
                 config.attention_dropout = self.attention_dropout
                 extra_kwargs["config"] = config
-            self.model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                path,
-                # device_map={"": "cuda:0"},
-                torch_dtype=torch.bfloat16,
-                **extra_kwargs,
+            self.model = AutoModelForImageTextToText.from_pretrained(
+                path, torch_dtype=torch.bfloat16, **extra_kwargs
             )
-            print("Loading Qwen2.5 full model from", path)
+            print("Loading full VLM model from", path)
 
-        if self.use_flash_attention_2:
-            self.processor = Qwen2_5_VLProcessor.from_pretrained(
+        if self.attn_implementation == "flash_attention_2":
+            self.processor = AutoProcessor.from_pretrained(
                 path,
                 min_pixels=self.min_pixel,
                 max_pixels=self.max_pixel,
                 padding_side="left",
             )
         else:
-            self.processor = Qwen2_5_VLProcessor.from_pretrained(
+            self.processor = AutoProcessor.from_pretrained(
                 path,
                 min_pixels=self.min_pixel,
                 max_pixels=self.max_pixel,
             )
 
-        print("Loading Qwen2.5 processor from", path)
+        self.question_token_id = self._get_single_token_id("?")
+        self.pad_token_id = self.processor.tokenizer.pad_token_id
+
+        print("Loading VLM processor from", path)
 
         QwenActor.to(self, _device)
 

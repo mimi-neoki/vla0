@@ -32,7 +32,7 @@ We'd love to hear about your work! If you've used VLA-0 in your research or proj
 
 ## Installation
 
-This section provides streamlined installation steps for training and evaluating VLA-0 (based on Qwen2.5-VL-3B) with LIBERO support.
+This section provides streamlined installation steps for training and evaluating VLA-0 with LIBERO support. The released VLA-0 checkpoints are based on Qwen2.5-VL-3B, and the training code now also supports Qwen3.5 Image-Text-to-Text models.
 
 ### Installation Steps
 
@@ -42,24 +42,33 @@ git clone --recurse-submodules git@github.com:NVlabs/vla0.git
 cd vla0
 ```
 
-**Step 1: Create conda environment**
+**Step 1: Create a uv-managed Python 3.12 environment**
 ```bash
-conda create -y -n vla0 python=3.10
-conda activate vla0
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv python install 3.12
+uv venv .venv --python 3.12
+source .venv/bin/activate
+uv pip install pip
 ```
 
-**Step 2: Install package with qwen and libero extras**
+**Step 2: Sync the locked base environment**
 ```bash
-PIP_REQ_EXTRAS=qwen,libero pip install --no-build-isolation -e ".[qwen,libero]"
+uv sync --extra qwen --extra lerobot
 ```
 
-**Step 3: Install dataset library with lerobot extras**
-*Note: The "RoboVerse" library here is distinct from the RoboVerse paper. It is our standalone library for initializing various robot datasets. Currently tested for LeRobot datasets (version 0.1).*
+**Step 3: Install local packages and LIBERO helpers**
 ```bash
+PIP_REQ_EXTRAS=libero pip install --no-build-isolation -e ".[qwen,libero]"
 cd libs/RoboVerse
 PIP_REQ_EXTRAS=lerobot pip install --no-build-isolation -e ".[lerobot]"
 cd ../..
 ```
+
+Notes:
+- `lerobot==0.5.1` requires Python 3.12+, so the setup now targets Python 3.12.
+- Install system packages such as `ffmpeg` and `cmake` beforehand if they are not already available on your machine.
+- `uv.lock` manages the shared runtime dependencies for LeRobot and Qwen. Qwen3.5 support requires a recent `transformers` build from the Hugging Face main branch, which is tracked in the lockfile.
+- Qwen3.5 can use `use_flash_attention_2: True`. If `flash-attn` is installed, VLA-0 uses FlashAttention-2; otherwise it falls back to PyTorch SDPA automatically. For Qwen3.5's linear-attention blocks, installing `flash-linear-attention` enables the faster FLA kernels. Installing `causal-conv1d` unlocks the remaining Qwen3.5 fast path, but building it requires a CUDA toolkit with `nvcc`.
 
 ### Evaluating on Libero
 Download the trained model from [here](https://huggingface.co/ankgoyal/vla0-libero/tree/main) and place it under `vla0/runs`. The command generates videos of the runs and saves them in the run folder.
@@ -87,6 +96,12 @@ python logs/parse_libero_results.py <run_id>
 ```bash
 python -m rv_train.train --exp-config ./configs/vla0.yaml
 ```
+
+To start from a Qwen3.5 base model instead, use the example config:
+```bash
+python -m rv_train.train --exp-config ./configs/vla0_qwen35_4b.yaml
+```
+
 ### Training on Custom LeRobot Data
 - Create a dataset config file like `libs/RoboVerse/roboverse/configs/img_libero_aug.yaml`. It specifies the dataset. All the configurations and their default values are provided in `libs/RoboVerse/roboverse/configs.py`. The dataset config file overwrites the defaults. Some keys of interest are:
   - `horizon`: how many future timesteps to predict
@@ -101,6 +116,7 @@ python -m rv_train.train --exp-config ./configs/vla0.yaml
 - The training config file specifies the training run. All the configurations and their default values are provided in `rv_train/configs.py`. Some keys of interest are:
   - `MODEL.QWEN.original_action_dim`: number of dimensions in the action space. Should be `7` for 7-DoF joint pose.
   - `MODEL.QWEN.num_bins_actions`: for discretizing actions between 0 to num_bins_actions
+  - `MODEL.QWEN.qwen_model_id`: base VLM checkpoint, e.g. `Qwen/Qwen2.5-VL-3B-Instruct`, `Qwen/Qwen3.5-4B`, or `Qwen/Qwen3.5-9B`
 
 - Launch training run for that exp-config like this:
 ```bash
@@ -142,20 +158,20 @@ VLA-0 is compatible with multiple versions of LeRobot:
 |-----------------|------------------|--------|
 | 0.1.0 | v2.1 | ✅ Tested (original) |
 | 0.4.x | v3.0 | ✅ Compatible |
+| 0.5.1 | v3.0 | ✅ Compatible |
 
 The dataloader automatically detects which version is installed and uses the appropriate APIs. Key differences between versions:
 
-- **Import paths**: v3.0 moved from `lerobot.common.datasets` to `lerobot.datasets`
+- **Import paths**: v3.0 moved from `lerobot.common.datasets` to `lerobot.datasets`, and `v0.5.1` keeps `MultiLeRobotDataset` in `lerobot.datasets.multi_dataset`
 - **Episode indexing**: v3.0 uses a different approach for filtered episodes
 - **Data format**: v3.0 uses chunked parquet files instead of per-episode files
 
-To upgrade to the latest LeRobot:
+To align an existing environment to `lerobot==0.5.1`:
 ```bash
-cd libs/RoboVerse/libs/lerobot
-git fetch origin
-git checkout origin/main
+uv sync --extra lerobot
+cd libs/RoboVerse
+PIP_REQ_EXTRAS=lerobot pip install --no-build-isolation -e ".[lerobot]"
 cd ../..
-pip install -e ".[lerobot]"
 ```
 
 ---
@@ -191,8 +207,9 @@ If you find VLA-0 useful in your research, please consider citing:
 VLA-0 code and VLA-0 for Libero model are released under the [CC BY-NC 4.0 license](https://creativecommons.org/licenses/by-nc/4.0/deed.en).
 
 **Additional Information:**
-- Built with Qwen2.5-VL-3B-Instruct
-- Subject to [Qwen Research License](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct) for the base model
+- Released VLA-0 checkpoints are built with [Qwen2.5-VL-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct)
+- The training code also supports Qwen3.5 Image-Text-to-Text checkpoints such as `Qwen/Qwen3.5-4B` and `Qwen/Qwen3.5-9B`
+- Base-model licensing follows the selected Qwen checkpoint
 
 ---
 

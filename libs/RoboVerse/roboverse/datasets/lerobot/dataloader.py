@@ -20,18 +20,26 @@ warnings.filterwarnings("ignore")
 
 # Version compatibility layer for LeRobot
 # LeRobot v0.1.0 (codebase v2.1): lerobot.common.datasets.lerobot_dataset
-# LeRobot v0.4.x (codebase v3.0): lerobot.datasets.lerobot_dataset
+# LeRobot v0.4.x/v0.5.x (codebase v3.0): lerobot.datasets.*
 try:
     # Try new import path first (LeRobot >= 0.4.0, codebase v3.0)
-    from lerobot.datasets.lerobot_dataset import (LeRobotDataset,
-                                                  LeRobotDatasetMetadata,
-                                                  MultiLeRobotDataset)
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+
+    try:
+        # LeRobot v0.5.x keeps MultiLeRobotDataset in its own module.
+        from lerobot.datasets.multi_dataset import MultiLeRobotDataset
+    except ImportError:
+        # Older v3.0-compatible releases exposed it from lerobot_dataset.
+        from lerobot.datasets.lerobot_dataset import MultiLeRobotDataset
 
     LEROBOT_V3 = True
 except ImportError:
     # Fall back to old import path (LeRobot 0.1.0, codebase v2.1)
     from lerobot.common.datasets.lerobot_dataset import (
-        LeRobotDataset, LeRobotDatasetMetadata, MultiLeRobotDataset)
+        LeRobotDataset,
+        LeRobotDatasetMetadata,
+        MultiLeRobotDataset,
+    )
 
     LEROBOT_V3 = False
 
@@ -81,8 +89,6 @@ def get_final_le_cam_list_rv_cam_list(metadata, le_cam_list, rv_cam_list):
         le_cam_list = (
             list(le_cam_list) if not isinstance(le_cam_list, list) else le_cam_list
         )
-        print(f"le_cam_list: {le_cam_list}")
-        print(f"metadata.camera_keys: {metadata.camera_keys}")
         for _cam in le_cam_list:
             assert _cam in metadata.camera_keys, f"Camera {_cam} not found in metadata"
 
@@ -118,6 +124,7 @@ def le_sample_to_rv_sample(
     convert_ori_act_to_delta_act=False,
     remove_noop_actions=False,
     fps=-1,
+    resolved_le_cam_list=None,
 ):
     """
     Convert a sample from LeRobot dataset to a sample in RV dataset. Should use the exact same arguments as LeRobotRV.__init__.
@@ -136,12 +143,13 @@ def le_sample_to_rv_sample(
     :return: (dict) A sample in RV dataset
     """
     rv_sample = {}
-    metadata = get_lerobot_metadata(repo_id)
-    le_cam_list, _ = get_final_le_cam_list_rv_cam_list(
-        metadata, le_cam_list, rv_cam_list
-    )
+    if resolved_le_cam_list is None:
+        metadata = get_lerobot_metadata(repo_id)
+        resolved_le_cam_list, _ = get_final_le_cam_list_rv_cam_list(
+            metadata, le_cam_list, rv_cam_list
+        )
 
-    rgb = [sample[x] * 255 for x in le_cam_list]
+    rgb = [sample[x] * 255 for x in resolved_le_cam_list]
     if history > 1:
         rgb = [rearrange(x, "hi c h w -> hi 1 h w c") for x in rgb]
     else:
@@ -245,6 +253,8 @@ class LeRobotRV(Dataset):
             metadata, le_cam_list, rv_cam_list
         )
         print(f"LeRobot and RoboVerse Camera Mapping: {_le_cam_list} -> {_rv_cam_list}")
+        self._resolved_le_cam_list = _le_cam_list
+        self._resolved_rv_cam_list = _rv_cam_list
         self.cam_list = _rv_cam_list
 
         # get the LeRobotDataset
@@ -383,6 +393,7 @@ class LeRobotRV(Dataset):
             self.action_key,
             self.state_key,
             convert_ori_act_to_delta_act=self.convert_ori_act_to_delta_act,
+            resolved_le_cam_list=self._resolved_le_cam_list,
         )
         if self.remove_noop_actions:
             is_noop = False

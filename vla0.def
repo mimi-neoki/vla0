@@ -99,8 +99,6 @@ From: nvidia/cuda:12.8.1-devel-ubuntu22.04
         "causal-conv1d>=1.6.1"
     python -m pip install --no-cache-dir --no-deps \
         https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.7cxx11abiTRUE-cp312-cp312-linux_x86_64.whl
-    python -m pip install --no-cache-dir --force-reinstall --no-deps \
-        nvidia-nccl-cu12==2.29.7
 
     if [ ! -f libs/LIBERO/setup.py ]; then
         git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git libs/LIBERO
@@ -146,6 +144,8 @@ From: nvidia/cuda:12.8.1-devel-ubuntu22.04
     python -m pip install --no-build-isolation -e .
     python -m pip install --no-deps --force-reinstall \
         https://github.com/bitsandbytes-foundation/bitsandbytes/releases/download/continuous-release_main/bitsandbytes-1.33.7.preview-py3-none-manylinux_2_24_x86_64.whl
+    python -m pip install --no-cache-dir --force-reinstall --no-deps \
+        nvidia-nccl-cu12==2.29.7
 
     mkdir -p /usr/share/glvnd/egl_vendor.d
     cat > /usr/share/glvnd/egl_vendor.d/10_nvidia.json <<'EOF'
